@@ -11,7 +11,7 @@ jobs:
       steps:
         - name: Get tag name
           id: get_tag
-          run: echo "TAG_NAME=$(echo ${GITHUB_REF#refs/tags/}')" >> $GITHUB_OUTPUT
+          run: echo "TAG_NAME=$(echo ${GITHUB_REF#refs/tags/})" >> $GITHUB_OUTPUT
           shell: bash
         - name: Create release
           id: create_release
@@ -36,6 +36,11 @@ jobs:
         - name: Checkout code
           uses: actions/checkout@v4
 
+        - name: Get release tag
+          id: get_release
+          run: echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          shell: bash
+
         - name: Set CUDA and PyTorch versions
           run: |
             export MATRIX_CUDA_VERSION=$(echo ${{ matrix.cuda-version }} | awk -F \. {'print $1 $2'})
@@ -49,7 +54,7 @@ jobs:
                 print(minv if int(${MATRIX_CUDA_VERSION}) < 120 else maxv)" \
                 )
             export MAX_JOBS=$([ "$MATRIX_CUDA_VERSION" == "129" ] && echo 1 || echo 2)
-            export EXTRA_BUILD_TAG="torch${WHEEL_TORCH_VISION}_cu${WHEEL_CUDA_VERSION}"
+            export EXTRA_BUILD_TAG="cu${WHEEL_CUDA_VERSION}_torch${WHEEL_TORCH_VISION}"
             # Write variables to the GitHub environment
             echo "MATRIX_CUDA_VERSION=${MATRIX_CUDA_VERSION}" >> $GITHUB_ENV
             echo "MATRIX_TORCH_VERSION=${MATRIX_TORCH_VERSION}" >> $GITHUB_ENV
@@ -59,6 +64,11 @@ jobs:
             echo "MAX_JOBS=$MAX_JOBS" >> $GITHUB_ENV
             echo "WHEEL_TORCH_VISION=${WHEEL_TORCH_VISION}" >> $GITHUB_ENV
             echo "EXTRA_BUILD_TAG=${EXTRA_BUILD_TAG}" >> $GITHUB_ENV
+
+        - name: Set build version
+          run: |
+            echo "BUILD_VERSION=${{ steps.get_release.outputs.RELEASE_TAG }}"
+            export "BUILD_VERSION=${BUILD_VERSION#v}"
 
         - name: Free up disk space
           if: ${{ runner.os == 'Linux' }}
@@ -82,7 +92,7 @@ jobs:
             CIBW_BUILD_VERBOSITY: 3
             CIBW_MANYLINUX_X86_64_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
             CIBW_BUILD: "cp${{ env.MATRIX_PYTHON_VERSION }}-*"
-            CIBW_ENVIRONMENT_PASS_LINUX: "MATRIX_CUDA_VERSION MATRIX_TORCH_VERSION WHEEL_CUDA_VERSION MATRIX_PYTHON_VERSION TORCH_CUDA_VERSION MAX_JOBS WHEEL_TORCH_VISION EXTRA_BUILD_TAG"
+            CIBW_ENVIRONMENT_PASS_LINUX: "MATRIX_CUDA_VERSION MATRIX_TORCH_VERSION WHEEL_CUDA_VERSION MATRIX_PYTHON_VERSION TORCH_CUDA_VERSION MAX_JOBS WHEEL_TORCH_VISION EXTRA_BUILD_TAG BUILD_VERSION"
             CIBW_BUILD_FRONTEND: "pip"
             CIBW_BEFORE_ALL: |
               set -x
@@ -96,6 +106,7 @@ jobs:
               echo "MAX_JOBS=${MAX_JOBS}"
               echo "WHEEL_TORCH_VISION=${WHEEL_TORCH_VISION}"
               echo "EXTRA_BUILD_TAG=${EXTRA_BUILD_TAG}"
+              echo "BUILD_VERSION=${BUILD_VERSION}"
               echo "========Checking environment variables========"
             CIBW_BEFORE_BUILD: |
               pip install --upgrade pip
@@ -120,11 +131,6 @@ jobs:
         - name: Get wheel name
           id: get_wheel_name
           run: echo "wheel_name=$(ls dist/*.whl | xargs -n 1 basename | head -n 1" >> $GITHUB_OUTPUT
-          shell: bash
-
-        - name: Get release tag
-          id: get_release
-          run: echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
           shell: bash
 
         - name: Upload wheels
