@@ -1,0 +1,139 @@
+name: "Build and deploy wheels"
+on:
+  create:
+    tags:
+      - "v*"
+
+jobs:
+    setup_release:
+      name: "Setup Release"
+      runs-on: ubuntu-latest
+      steps:
+        - name: Get tag name
+          id: get_tag
+          run: echo "TAG_NAME=$(echo ${GITHUB_REF#refs/tags/}')" >> $GITHUB_OUTPUT
+          shell: bash
+        - name: Create release
+          id: create_release
+          uses: actions/create-release@v1
+          with:
+            tag_name: ${{ steps.get_tag.outputs.TAG_NAME }}
+            release_name: "release_${{ steps.get_tag.outputs.TAG_NAME }}"
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    build_wheels:
+      name: "Build Wheels"
+      runs-on: ${{ matrix.os }}
+      needs: setup_release
+      strategy:
+        matrix:
+          os: [ubuntu-latest]
+          python-version: [3.8, 3.9, 3.10, 3.11, 3.12]
+          torch-version: [1.12.0, 1.13.0, 2.0.0, 2.1.0, 2.2.0, 2.3.0, 2.4.0, 2.5.0, 2.6.0, 2.7.0]
+          cuda-version: [10.2, 11.8, 12.9]
+      steps:
+        - name: Checkout code
+          uses: actions/checkout@v4
+
+        - name: Set CUDA and PyTorch versions
+          run: |
+            export MATRIX_CUDA_VERSION=$(echo ${{ matrix.cuda-version }} | awk -F \. {'print $1 $2'})
+            export MATRIX_TORCH_VERSION=$(echo ${{ matrix.torch-version }} | awk -F \. {'print $1 "." $2'})
+            export WHEEL_TORCH_VISION=$(echo ${{ matrix.torch-version }} | awk -F \. {'print $1 $2'})
+            export WHEEL_CUDA_VERSION=$(echo ${{ matrix.cuda-version }} | awk -F \. {'print $1'})
+            export MATRIX_PYTHON_VERSION=$(echo ${{ matrix.python-version }} | awk -F \. {'print $1 $2'})
+            export TORCH_CUDA_VERSION=$(python -c "from os import environ as env; \
+                minv = {'2.4': 118, '2.5': 118, '2.6': 118, '2.7': 118}['${MATRIX_TORCH_VERSION}']; \
+                maxv = {'2.4': 124, '2.5': 124, '2.6': 126, '2.7': 128}['${MATRIX_TORCH_VERSION}']; \
+                print(minv if int(${MATRIX_CUDA_VERSION}) < 120 else maxv)" \
+                )
+            export MAX_JOBS=$([ "$MATRIX_CUDA_VERSION" == "129" ] && echo 1 || echo 2)
+            export EXTRA_BUILD_TAG="torch${WHEEL_TORCH_VISION}_cu${WHEEL_CUDA_VERSION}"
+            # Write variables to the GitHub environment
+            echo "MATRIX_CUDA_VERSION=${MATRIX_CUDA_VERSION}" >> $GITHUB_ENV
+            echo "MATRIX_TORCH_VERSION=${MATRIX_TORCH_VERSION}" >> $GITHUB_ENV
+            echo "WHEEL_CUDA_VERSION=${WHEEL_CUDA_VERSION}" >> $GITHUB_ENV
+            echo "MATRIX_PYTHON_VERSION=${MATRIX_PYTHON_VERSION}" >> $GITHUB_ENV
+            echo "TORCH_CUDA_VERSION=${TORCH_CUDA_VERSION}" >> $GITHUB_ENV
+            echo "MAX_JOBS=$MAX_JOBS" >> $GITHUB_ENV
+            echo "WHEEL_TORCH_VISION=${WHEEL_TORCH_VISION}" >> $GITHUB_ENV
+            echo "EXTRA_BUILD_TAG=${EXTRA_BUILD_TAG}" >> $GITHUB_ENV
+
+        - name: Free up disk space
+          if: ${{ runner.os == 'Linux' }}
+          # https://github.com/easimon/maximize-build-space/blob/master/action.yml
+          # https://github.com/easimon/maximize-build-space/tree/test-report
+          run: |
+            sudo rm -rf /usr/share/dotnet
+            sudo rm -rf /opt/ghc
+            sudo rm -rf /opt/hostedtoolcache/CodeQL
+
+        - name: Set up swap space
+          if: runner.os == 'Linux'
+          uses: pierotofy/set-swap-space@v1.0
+          with:
+            swap-size-gb: 4
+
+        - name: Build wheels
+          uses: pypa/cibuildwheel@v3.1.1
+          env:
+            CIBW_DEBUG_TRACEBACK: 1
+            CIBW_BUILD_VERBOSITY: 3
+            CIBW_MANYLINUX_X86_64_IMAGE: "quay.io/pypa/manylinux_2_28_x86_64"
+            CIBW_BUILD: "cp${{ env.MATRIX_PYTHON_VERSION }}-*"
+            CIBW_ENVIRONMENT_PASS_LINUX: "MATRIX_CUDA_VERSION MATRIX_TORCH_VERSION WHEEL_CUDA_VERSION MATRIX_PYTHON_VERSION TORCH_CUDA_VERSION MAX_JOBS WHEEL_TORCH_VISION EXTRA_BUILD_TAG"
+            CIBW_BUILD_FRONTEND: "pip"
+            CIBW_BEFORE_ALL: |
+              set -x
+              # Check environment variables
+              echo "========Checking environment variables========"
+              echo "MATRIX_CUDA_VERSION=${MATRIX_CUDA_VERSION}"
+              echo "MATRIX_TORCH_VERSION=${MATRIX_TORCH_VERSION}"
+              echo "WHEEL_CUDA_VERSION=${WHEEL_CUDA_VERSION}"
+              echo "MATRIX_PYTHON_VERSION=${MATRIX_PYTHON_VERSION}"
+              echo "TORCH_CUDA_VERSION=${TORCH_CUDA_VERSION}"
+              echo "MAX_JOBS=${MAX_JOBS}"
+              echo "WHEEL_TORCH_VISION=${WHEEL_TORCH_VISION}"
+              echo "EXTRA_BUILD_TAG=${EXTRA_BUILD_TAG}"
+              echo "========Checking environment variables========"
+            CIBW_BEFORE_BUILD: |
+              pip install --upgrade pip
+              pip install typing-extensions
+              pip install 'numpy<2.0'
+              pip install ninja packaging wheel setuptools"
+          with:
+            output-dir: dist
+
+        - name: List wheels
+          run: ls -lh dist/
+          shell: bash
+        
+        - name: Rename wheels
+          run:
+            for wheel in dist/*.whl; do
+              new_name=$(python -c "print('-'.join([*'$wheel'.split('-')[:2], 'cu12_torch21', *'$wheel'.split('-')[-3:]]))")
+              mv "$wheel" "dist/$new_name"
+            done
+          shell: bash
+        
+        - name: Get wheel name
+          id: get_wheel_name
+          run: echo "wheel_name=$(ls dist/*.whl | xargs -n 1 basename | head -n 1" >> $GITHUB_OUTPUT
+          shell: bash
+
+        - name: Get release tag
+          id: get_release
+          run: echo "RELEASE_TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          shell: bash
+
+        - name: Upload wheels
+          id: upload_release_asset
+          uses: actions/upload-release-asset@v1
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          with:
+            upload_url: ${{ steps.get_release.outputs.upload_url }}
+            asset_path: ./dist/${{ steps.get_wheel_name.outputs.wheel_name }}
+            asset_name: ${{ steps.get_wheel_name.outputs.wheel_name }}
+            asset_content_type: application/*
